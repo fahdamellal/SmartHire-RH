@@ -1,0 +1,4 @@
+fswatch -0 /Users/peace/SmartHire/backend/app/cvs | while IFS= read -r -d '' file; do
+  echo "Change detected: $file"
+  cd /Users/peace/SmartHire/backend && /usr/local/opt/php@8.3/bin/php artisan cvs:scan
+done

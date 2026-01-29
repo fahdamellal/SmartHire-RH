@@ -13,17 +13,17 @@ class DemandMatcher
         int $topKFiles = 5,
         int $topKChunks = 300
     ): array {
-        $topKFiles = max(1, min(20, (int)$topKFiles));
+        $topKFiles  = max(1, min(20, (int)$topKFiles));
         $topKChunks = max(50, min(1500, (int)$topKChunks));
 
         $c = $this->normalizeCriteria($criteria, $rawMessage);
 
-        // 1) shortlist via vector (chunks)
+        // 1) shortlist via vector (chunks) — cosine sim normalisée 0..1
         $rows = DB::select("
             WITH top_chunks AS (
                 SELECT
                     c.id_file,
-                    (1 - (c.embedding <=> ?::vector)) AS sim
+                    (1 - ((c.embedding <=> ?::vector) / 2.0)) AS sim
                 FROM cv_chunks c
                 ORDER BY c.embedding <=> ?::vector
                 LIMIT ?
@@ -36,9 +36,7 @@ class DemandMatcher
                 FROM top_chunks
                 GROUP BY id_file
             )
-            SELECT
-                a.id_file,
-                a.sim_max, a.sim_avg
+            SELECT a.id_file, a.sim_max, a.sim_avg
             FROM agg a
         ", [$queryVectorLiteral, $queryVectorLiteral, $topKChunks]);
 
@@ -46,21 +44,22 @@ class DemandMatcher
 
         $ids = array_map(fn($r) => (int)$r->id_file, $rows);
 
-        // 2) charger full cv_text + skills + meta
+        // 2) charger cv_text + skills + meta
         $files = DB::table('cv_files')
             ->select('id_file','nom','prenom','email','phone','file_path','skills','cv_text')
             ->whereIn('id_file', $ids)
             ->get();
 
+        // map vector scores
         $vecMap = [];
         foreach ($rows as $r) {
             $vecMap[(int)$r->id_file] = [
-                'sim_max' => (float)$r->sim_max,
-                'sim_avg' => (float)$r->sim_avg,
+                'sim_max' => $this->clamp01((float)$r->sim_max),
+                'sim_avg' => $this->clamp01((float)$r->sim_avg),
             ];
         }
 
-        // 3) hard requirements (ex: java+spring obligatoires si demandés)
+        // required (soft penalties)
         $required = $this->requiredSkills($c);
 
         $scored = [];
@@ -70,22 +69,15 @@ class DemandMatcher
             $skills = $this->decodeSkills($f->skills);
             $cvText = mb_strtolower((string)($f->cv_text ?? ''));
 
-            // HARD FILTER (si required non vide)
-            if ($required) {
-                $ok = true;
-                foreach ($required as $req) {
-                    $has = in_array($req, $skills, true) || $this->hasToken($cvText, $req);
-                    if (!$has) { $ok = false; break; }
-                }
-                if (!$ok) continue;
-            }
-
+            // --- Vector score (0..1)
             $v = $vecMap[$id] ?? ['sim_max'=>0.0,'sim_avg'=>0.0];
             $vecScore = (0.75 * $v['sim_max']) + (0.25 * $v['sim_avg']);
+            $vecScore = $this->clamp01($vecScore);
 
-            // lexical bonus sur TOUT le CV (pas sample_text)
+            // --- Lexical signals
             $lex = $this->lexSignals($cvText, $c, $skills);
 
+            // bonus lexical (0..~0.38) => on clamp ensuite
             $lexScore =
                 (0.18 * $lex['stack_ratio']) +
                 (0.08 * $lex['keywords_ratio']) +
@@ -93,16 +85,53 @@ class DemandMatcher
                 (0.04 * ($lex['location_hit'] ? 1 : 0)) +
                 (0.03 * ($lex['seniority_hit'] ? 1 : 0));
 
-            // Bonus spécial : si React demandé (souvent “nice to have”)
+            // bonus React (optionnel)
             if (in_array('react', $c['stack'], true) && (in_array('react', $skills, true) || $this->hasToken($cvText, 'react'))) {
                 $lexScore += 0.05;
             }
 
-            $final = $vecScore + $lexScore;
+            // ------------------------
+            // GATING (anti "plombier => dev")
+            // Si user a demandé un role/stack/keywords => il faut au moins 1 signal lexical
+            // (sinon on drop le CV)
+            // ------------------------
+            $userHasIntent = !empty($c['role']) || !empty($c['stack']) || !empty($c['keywords']);
+            $hasAnySignal  = ($lex['stack_hits'] > 0) || $lex['role_hit'] || ($lex['keywords_ratio'] > 0);
+
+            if ($userHasIntent && !$hasAnySignal) {
+                continue;
+            }
+
+            // ---- Soft penalties ----
+            $missingRequired = 0;
+            foreach ($required as $req) {
+                $has = in_array($req, $skills, true) || $this->hasToken($cvText, $req);
+                if (!$has) $missingRequired++;
+            }
+
+            $penaltyRequired = 0.18 * $missingRequired;
+
+            $missingStack = max(0, count($c['stack']) - ($lex['stack_hits'] ?? 0));
+            $penaltyMissingStack = 0.05 * $missingStack;
+
+            if (!empty($c['strict_exact']) && $missingRequired > 0) {
+                $penaltyRequired += 0.25 * $missingRequired;
+            }
+
+            // --- Final score (on garde 0..1)
+            // Mix plus stable: vector dominant, lex en support
+            $final = (0.82 * $vecScore) + (0.18 * $this->clamp01($lexScore));
+            $final = $final - $penaltyRequired - $penaltyMissingStack;
+            $final = $this->clamp01($final);
+
+            // petit seuil par-candidat (évite résultats faibles)
+            if ($final < 0.20) continue;
 
             $scored[] = [
                 'id_file' => $id,
-                'score' => $final,
+                'score' => $final, // 0..1
+                'similarity_percent' => round($final * 100, 1),
+
                 'nom' => $f->nom,
                 'prenom' => $f->prenom,
                 'email' => $f->email,
@@ -111,42 +140,32 @@ class DemandMatcher
                 'cv_url' => url('/api/cv/' . $id),
                 'skills' => $skills,
 
-                // debug (tu peux enlever plus tard)
                 '_debug' => [
-                    'required' => $required,
                     'vec' => round($vecScore, 4),
-                    'lex' => [
-                        'stack_hits' => $lex['stack_hits'],
-                        'stack_ratio' => round($lex['stack_ratio'], 3),
-                        'keywords_ratio' => round($lex['keywords_ratio'], 3),
-                        'role_hit' => $lex['role_hit'],
-                        'location_hit' => $lex['location_hit'],
-                        'seniority_hit' => $lex['seniority_hit'],
-                    ],
+                    'lex_raw' => round($lexScore, 4),
+                    'missing_required' => $missingRequired,
+                    'penalty_required' => round($penaltyRequired, 4),
+                    'missing_stack' => $missingStack,
+                    'penalty_missing_stack' => round($penaltyMissingStack, 4),
                     'criteria' => $c,
                 ],
             ];
         }
 
-        if (!$scored) {
-            // fallback contrôlé : si strict et rien → on enlève 1 contrainte (ex: react)
-            if ($c['strict'] && in_array('react', $required, true)) {
-                $required = array_values(array_filter($required, fn($x) => $x !== 'react'));
-                if ($required) {
-                    // relance léger en mémoire : on refiltre avec required sans react
-                    // (simple: on refait match sans strict hard react en “requiredSkills” via criteria modifiée)
-                    $c2 = $c;
-                    $c2['stack'] = array_values(array_filter($c2['stack'], fn($x) => $x !== 'react'));
-                    return $this->match($queryVectorLiteral, $c2, $rawMessage, $topKFiles, $topKChunks);
-                }
-            }
+        if (!$scored) return [];
+
+        usort($scored, fn($a, $b) => $b['score'] <=> $a['score']);
+        $top = array_slice($scored, 0, $topKFiles);
+
+        // Seuil global : si même le meilleur est faible => aucun résultat
+        if (($top[0]['score'] ?? 0) < 0.45) {
             return [];
         }
 
-        usort($scored, fn($a, $b) => $b['score'] <=> $a['score']);
-        return array_slice($scored, 0, $topKFiles);
+        return $top;
     }
 
+    // IMPORTANT: ton ChatSearchController l'appelle => il faut cette méthode
     public function upsertResults(int $idDemande, array $results): void
     {
         foreach ($results as $r) {
@@ -161,67 +180,63 @@ class DemandMatcher
 
     // ---------------- helpers ----------------
 
-private function decodeSkills($raw): array
-{
-    // $raw peut être: null, string JSON, array (cast), stdClass...
-    if ($raw === null) return [];
-
-    if (is_string($raw)) {
-        $decoded = json_decode($raw, true);
-        $raw = is_array($decoded) ? $decoded : [];
-    } elseif ($raw instanceof \stdClass) {
-        $raw = (array) $raw;
-    } elseif (!is_array($raw)) {
-        $raw = [];
+    private function clamp01(float $x): float
+    {
+        if ($x < 0) return 0.0;
+        if ($x > 1) return 1.0;
+        return $x;
     }
 
-    // Aplatir n'importe quelle structure en strings
-    $flat = [];
-    $walk = function ($v) use (&$flat, &$walk) {
-        if (is_string($v)) {
-            $s = trim($v);
-            if ($s !== '') $flat[] = $s;
-            return;
+    private function decodeSkills($raw): array
+    {
+        if ($raw === null) return [];
+
+        if (is_string($raw)) {
+            $decoded = json_decode($raw, true);
+            $raw = is_array($decoded) ? $decoded : [];
+        } elseif ($raw instanceof \stdClass) {
+            $raw = (array)$raw;
+        } elseif (!is_array($raw)) {
+            $raw = [];
         }
-        if (is_numeric($v)) {
-            $flat[] = (string) $v;
-            return;
-        }
-        if (is_array($v)) {
-            foreach ($v as $vv) $walk($vv);
-            return;
-        }
-        if ($v instanceof \stdClass) {
-            foreach ((array)$v as $vv) $walk($vv);
-            return;
-        }
-        // ignore bool/null/other
-    };
 
-    $walk($raw);
+        $flat = [];
+        $walk = function ($v) use (&$flat, &$walk) {
+            if (is_string($v)) {
+                $s = trim($v);
+                if ($s !== '') $flat[] = $s;
+                return;
+            }
+            if (is_numeric($v)) {
+                $flat[] = (string)$v;
+                return;
+            }
+            if (is_array($v)) {
+                foreach ($v as $vv) $walk($vv);
+                return;
+            }
+            if ($v instanceof \stdClass) {
+                foreach ((array)$v as $vv) $walk($vv);
+                return;
+            }
+        };
+        $walk($raw);
 
-    // normaliser + uniques
-    $flat = array_values(array_unique(array_map(fn($s) => mb_strtolower(trim($s)), $flat)));
+        $flat = array_values(array_unique(array_map(fn($s) => mb_strtolower(trim($s)), $flat)));
+        $flat = array_values(array_filter($flat, fn($s) => $s !== ''));
 
-    return $flat;
-}
-
-
+        return $flat;
+    }
 
     private function requiredSkills(array $c): array
     {
-        // règle simple et efficace:
-        // - si java demandé => java obligatoire
-        // - si spring demandé => spring obligatoire
-        // - react = souvent bonus, MAIS si user l’écrit dans stack, on peut le rendre obligatoire aussi (ton choix)
         $stack = $c['stack'] ?? [];
 
         $req = [];
         if (in_array('java', $stack, true)) $req[] = 'java';
         if (in_array('spring', $stack, true)) $req[] = 'spring';
 
-        // Option: rendre react obligatoire seulement si tu veux exact exact
-        if ($c['strict_exact'] && in_array('react', $stack, true)) $req[] = 'react';
+        if (!empty($c['strict_exact']) && in_array('react', $stack, true)) $req[] = 'react';
 
         return $req;
     }
@@ -240,18 +255,15 @@ private function decodeSkills($raw): array
             $out = $this->fallbackFromMessage($rawMessage, $out);
         } else {
             if (!$out['stack']) {
-                $tmp = $this->fallbackFromMessage($rawMessage, ['stack'=>[], 'keywords'=>[], 'role'=>null, 'location'=>null, 'seniority'=>null]);
+                $tmp = $this->fallbackFromMessage($rawMessage, [
+                    'stack'=>[], 'keywords'=>[], 'role'=>null, 'location'=>null, 'seniority'=>null
+                ]);
                 $out['stack'] = $tmp['stack'];
             }
         }
 
-        // strict: si stack existe
         $out['strict'] = count($out['stack']) > 0;
-
-        // strict_exact:
-        // - tu peux le mettre true si tu veux “Java+Spring+React obligatoires”
-        // - sinon false et React devient bonus
-        $out['strict_exact'] = false;
+        $out['strict_exact'] = $out['strict_exact'] ?? false;
 
         return $out;
     }
@@ -266,6 +278,7 @@ private function decodeSkills($raw): array
             'springboot' => 'spring',
             'spring' => 'spring',
             'react' => 'react',
+            'reactjs' => 'react',
             'angular' => 'angular',
             'vue' => 'vue',
             'laravel' => 'laravel',
@@ -303,7 +316,15 @@ private function decodeSkills($raw): array
         }
 
         if (!$base['role']) {
-            if (str_contains($m, 'développeur') || str_contains($m, 'developpeur') || str_contains($m, 'developer')) $base['role'] = 'developpeur';
+            if (str_contains($m, 'développeur') || str_contains($m, 'developpeur') || str_contains($m, 'developer')) {
+                $base['role'] = 'developpeur';
+            } else {
+                // role générique: prend un mot clé simple si possible
+                // (ex: "plombier", "joueur")
+                if (preg_match('/je\s*(veux|cherche)\s*\d*\s*([a-zàâäéèêëïîôöùûüç]+)/u', $m, $mm)) {
+                    $base['role'] = $mm[2] ?? null;
+                }
+            }
         }
 
         $kw = ['backend','front','frontend','fullstack','api','microservices','sécurité','securite','mobile'];
@@ -323,7 +344,6 @@ private function decodeSkills($raw): array
             $s = mb_strtolower(trim($x));
             if ($s === '') continue;
 
-            // normaliser quelques variantes
             if ($s === 'spring boot') $s = 'spring';
             if ($s === 'postgres') $s = 'postgresql';
             if ($s === 'reactjs') $s = 'react';
@@ -367,7 +387,6 @@ private function decodeSkills($raw): array
         $token = trim($token);
         if ($token === '') return false;
 
-        // accepte "spring boot" aussi via espaces (déjà normalisé)
         $re = '/\b' . preg_quote($token, '/') . '\b/u';
         return (bool)preg_match($re, $text);
     }

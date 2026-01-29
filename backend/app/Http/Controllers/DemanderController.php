@@ -10,7 +10,6 @@ class DemanderController extends Controller
 {
     public function listByDemande(int $id_demande): JsonResponse
     {
-        // 1) demande + criteria
         $demande = DB::selectOne("
             SELECT id_demande, entreprise, texte, criteria_json, created_at
             FROM demandes
@@ -24,7 +23,6 @@ class DemanderController extends Controller
             ], 404);
         }
 
-        // 2) résultats + status
         $rows = DB::select("
             SELECT
                 d.id_file,
@@ -42,10 +40,13 @@ class DemanderController extends Controller
         ", [$id_demande]);
 
         $results = array_map(function ($r) {
+            $score = $r->score !== null ? (float)$r->score : null;
+
             return [
                 'id_file' => (int)$r->id_file,
-                'score' => $r->score !== null ? (float)$r->score : null,
-                'status' => $r->status, // PROPOSED | VIEWED | INTERVIEW
+                'score' => $score,
+                'score_percent' => $score !== null ? round(max(0.0, min(1.0, $score)) * 100, 1) : null,
+                'status' => $r->status, // PROPOSED | VIEWED | INTERESTED
                 'nom' => $r->nom,
                 'prenom' => $r->prenom,
                 'email' => $r->email,
@@ -56,6 +57,7 @@ class DemanderController extends Controller
         }, $rows);
 
         return response()->json([
+            'ok' => true,
             'id_demande' => (int)$demande->id_demande,
             'criteria' => $demande->criteria_json ? json_decode($demande->criteria_json, true) : null,
             'results' => $results,
@@ -82,7 +84,7 @@ class DemanderController extends Controller
         }
 
         // idempotent
-        if ($row->status === 'VIEWED' || $row->status === 'INTERVIEW') {
+        if ($row->status === 'VIEWED' || $row->status === 'INTERESTED') {
             return response()->json([
                 'ok' => true,
                 'updated_rows' => 0,
@@ -130,20 +132,20 @@ class DemanderController extends Controller
         }
 
         // idempotent
-        if ($row->status === 'INTERVIEW') {
+        if ($row->status === 'INTERESTED') {
             return response()->json([
                 'ok' => true,
                 'updated_rows' => 0,
                 'id_demande' => $id_demande,
                 'id_file' => $id_file,
-                'new_status' => 'INTERVIEW',
-                'note' => 'Already INTERVIEW',
+                'new_status' => 'INTERESTED',
+                'note' => 'Already INTERESTED',
             ]);
         }
 
         $updated = DB::update("
             UPDATE demander
-            SET status = 'INTERVIEW'
+            SET status = 'INTERESTED'
             WHERE id_demande = ? AND id_file = ? AND status IN ('PROPOSED','VIEWED')
         ", [$id_demande, $id_file]);
 
@@ -158,6 +160,7 @@ class DemanderController extends Controller
             ]);
         }
 
+        // email (optionnel)
         $send = $mail->sendInterviewEmail(
             ['email' => $row->email, 'name' => trim(($row->prenom ?? '') . ' ' . ($row->nom ?? ''))],
             ['prenom' => $row->prenom, 'nom' => $row->nom],
@@ -169,7 +172,7 @@ class DemanderController extends Controller
             'updated_rows' => $updated,
             'id_demande' => $id_demande,
             'id_file' => $id_file,
-            'new_status' => 'INTERVIEW',
+            'new_status' => 'INTERESTED',
             'email' => $send,
         ]);
     }

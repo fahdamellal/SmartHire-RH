@@ -6,21 +6,25 @@ use Illuminate\Support\Facades\Schema;
 
 return new class extends Migration
 {
-    /**
-     * Run the migrations.
-     */
-   public function up(): void
-{
-    Schema::table('cv_files', function (Blueprint $table) {
-        $table->text('cv_text')->nullable();
-        $table->jsonb('skills')->nullable(); // Postgres jsonb
-    });
-}
+    public function up()
+    {
+        Schema::table('cv_files', function (Blueprint $table) {
+            if (!Schema::hasColumn('cv_files', 'cv_text')) {
+                $table->text('cv_text')->nullable();
+            }
+            if (!Schema::hasColumn('cv_files', 'skills')) {
+                $table->jsonb('skills')->nullable();
+            }
+            if (!Schema::hasColumn('cv_files', 'skills_flat')) {
+                $table->text('skills_flat')->nullable();
+            }
+        });
+    }
 
-public function down(): void
-{
-    Schema::table('cv_files', function (Blueprint $table) {
-        $table->dropColumn(['cv_text', 'skills']);
-    });
-}
+    public function down()
+    {
+        Schema::table('cv_files', function (Blueprint $table) {
+            $table->dropColumn(['cv_text', 'skills', 'skills_flat']);
+        });
+    }
 };

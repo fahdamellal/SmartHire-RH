@@ -6,7 +6,12 @@ use Illuminate\Support\Facades\Http;
 
 class GeminiEmbeddings
 {
-    public function embed(string $text, int $dim = 1536): array
+    /**
+     * $taskType:
+     * - RETRIEVAL_DOCUMENT (pour CV/chunks)
+     * - RETRIEVAL_QUERY (pour la demande utilisateur)
+     */
+    public function embed(string $text, int $dim = 1536, string $taskType = 'RETRIEVAL_DOCUMENT'): array
     {
         $apiKey = env('GEMINI_API_KEY');
         if (!$apiKey) {
@@ -16,7 +21,7 @@ class GeminiEmbeddings
         $payload = [
             "model" => "models/gemini-embedding-001",
             "content" => ["parts" => [["text" => $text]]],
-            "taskType" => "RETRIEVAL_DOCUMENT",
+            "taskType" => $taskType,
             "outputDimensionality" => $dim,
         ];
 

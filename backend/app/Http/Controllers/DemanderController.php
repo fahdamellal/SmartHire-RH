@@ -32,7 +32,8 @@ class DemanderController extends Controller
                 f.prenom,
                 f.email,
                 f.phone,
-                f.file_path
+                f.file_path,
+                f.skills
             FROM demander d
             JOIN cv_files f ON f.id_file = d.id_file
             WHERE d.id_demande = ?
@@ -41,6 +42,14 @@ class DemanderController extends Controller
 
         $results = array_map(function ($r) {
             $score = $r->score !== null ? (float)$r->score : null;
+
+            $skillsPreview = [];
+            if (!empty($r->skills)) {
+                $decoded = is_string($r->skills) ? json_decode($r->skills, true) : $r->skills;
+                if (is_array($decoded)) {
+                    $skillsPreview = array_slice($decoded, 0, 8);
+                }
+            }
 
             return [
                 'id_file' => (int)$r->id_file,
@@ -53,6 +62,7 @@ class DemanderController extends Controller
                 'phone' => $r->phone,
                 'file_path' => $r->file_path,
                 'cv_url' => url('/api/cv/' . (int)$r->id_file),
+                'skills_preview' => $skillsPreview,
             ];
         }, $rows);
 
@@ -83,7 +93,6 @@ class DemanderController extends Controller
             ], 404);
         }
 
-        // idempotent
         if ($row->status === 'VIEWED' || $row->status === 'INTERESTED') {
             return response()->json([
                 'ok' => true,
@@ -97,7 +106,7 @@ class DemanderController extends Controller
 
         $updated = DB::update("
             UPDATE demander
-            SET status = 'VIEWED'
+            SET status = 'VIEWED', updated_at = NOW()
             WHERE id_demande = ? AND id_file = ? AND status = 'PROPOSED'
         ", [$id_demande, $id_file]);
 
@@ -112,68 +121,80 @@ class DemanderController extends Controller
     }
 
     public function markInterview(int $id_demande, int $id_file, BrevoMailService $mail): JsonResponse
-    {
-        $row = DB::selectOne("
-            SELECT d.status, f.nom, f.prenom, f.email
-            FROM demander d
-            JOIN cv_files f ON f.id_file = d.id_file
-            WHERE d.id_demande = ? AND d.id_file = ?
-        ", [$id_demande, $id_file]);
+{
+    $row = DB::selectOne("
+        SELECT
+            d.status,
+            f.nom, f.prenom, f.email,
+            de.entreprise, de.texte, de.criteria_json
+        FROM demander d
+        JOIN cv_files f ON f.id_file = d.id_file
+        JOIN demandes de ON de.id_demande = d.id_demande
+        WHERE d.id_demande = ? AND d.id_file = ?
+    ", [$id_demande, $id_file]);
 
-        if (!$row) {
-            return response()->json([
-                'ok' => false,
-                'updated_rows' => 0,
-                'id_demande' => $id_demande,
-                'id_file' => $id_file,
-                'new_status' => null,
-                'note' => 'Row not found',
-            ], 404);
-        }
+    if (!$row) {
+        return response()->json([
+            'ok' => false,
+            'updated_rows' => 0,
+            'id_demande' => $id_demande,
+            'id_file' => $id_file,
+            'new_status' => null,
+            'note' => 'Row not found',
+        ], 404);
+    }
 
-        // idempotent
-        if ($row->status === 'INTERESTED') {
-            return response()->json([
-                'ok' => true,
-                'updated_rows' => 0,
-                'id_demande' => $id_demande,
-                'id_file' => $id_file,
-                'new_status' => 'INTERESTED',
-                'note' => 'Already INTERESTED',
-            ]);
-        }
-
-        $updated = DB::update("
-            UPDATE demander
-            SET status = 'INTERESTED'
-            WHERE id_demande = ? AND id_file = ? AND status IN ('PROPOSED','VIEWED')
-        ", [$id_demande, $id_file]);
-
-        if ($updated <= 0) {
-            return response()->json([
-                'ok' => false,
-                'updated_rows' => 0,
-                'id_demande' => $id_demande,
-                'id_file' => $id_file,
-                'new_status' => $row->status,
-                'note' => 'No row updated (status not PROPOSED/VIEWED)',
-            ]);
-        }
-
-        // email (optionnel)
-        $send = $mail->sendInterviewEmail(
-            ['email' => $row->email, 'name' => trim(($row->prenom ?? '') . ' ' . ($row->nom ?? ''))],
-            ['prenom' => $row->prenom, 'nom' => $row->nom],
-            ['id_demande' => $id_demande]
-        );
-
+    if ($row->status === 'INTERESTED') {
         return response()->json([
             'ok' => true,
-            'updated_rows' => $updated,
+            'updated_rows' => 0,
             'id_demande' => $id_demande,
             'id_file' => $id_file,
             'new_status' => 'INTERESTED',
-            'email' => $send,
+            'note' => 'Already INTERESTED',
         ]);
     }
+
+    $updated = DB::update("
+        UPDATE demander
+        SET status = 'INTERESTED'
+        WHERE id_demande = ? AND id_file = ? AND status IN ('PROPOSED','VIEWED')
+    ", [$id_demande, $id_file]);
+
+    if ($updated <= 0) {
+        return response()->json([
+            'ok' => false,
+            'updated_rows' => 0,
+            'id_demande' => $id_demande,
+            'id_file' => $id_file,
+            'new_status' => $row->status,
+            'note' => 'No row updated (status not PROPOSED/VIEWED)',
+        ]);
+    }
+
+    // poste depuis criteria_json (si موجود)
+    $criteria = $row->criteria_json ? json_decode($row->criteria_json, true) : [];
+    $poste = $criteria['job_title'] ?? $criteria['poste'] ?? 'Poste à pourvoir';
+
+    $send = $mail->sendInterviewEmail(
+        ['email' => $row->email, 'name' => trim(($row->prenom ?? '') . ' ' . ($row->nom ?? ''))],
+        ['prenom' => $row->prenom, 'nom' => $row->nom],
+        [
+            'id_demande' => $id_demande,
+            'entreprise' => $row->entreprise ?? 'Notre entreprise',
+            'poste' => $poste,
+            'texte' => $row->texte ?? '',
+        ]
+    );
+
+    return response()->json([
+        'ok' => true,
+        'updated_rows' => $updated,
+        'id_demande' => $id_demande,
+        'id_file' => $id_file,
+        'new_status' => 'INTERESTED',
+        'email' => $send,
+    ]);
+}
+
 }

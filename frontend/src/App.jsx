@@ -1,454 +1,693 @@
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
+import Dashboard from "./pages/Dashboard";
+import { apiPost, apiGet } from "./lib/api";
 
 export default function App() {
-  const [message, setMessage] = useState("Je cherche 5 plombier");
+  // ===== NAV =====
+  const [view, setView] = useState("search"); // "search" | "dashboard"
+
+  // ===== Search =====
+  const [message, setMessage] = useState("Développeur React à Rabat, 3 ans d'expérience, Laravel");
   const [loading, setLoading] = useState(false);
-
-  // API result of /api/chat/search
   const [data, setData] = useState(null);
+  const [uiError, setUiError] = useState("");
+  const [toast, setToast] = useState("");
 
-  // global UI messages
-  const [error, setError] = useState("");
-  const [actionMsg, setActionMsg] = useState("");
+  // ===== Selection =====
+  const [selectedId, setSelectedId] = useState(null);
+  const [profile, setProfile] = useState(null);
+  const [profileLoading, setProfileLoading] = useState(false);
 
-  // LinkedIn post state
+  // ===== LinkedIn fallback =====
   const [linkedinPost, setLinkedinPost] = useState("");
-  const [linkedinPostId, setLinkedinPostId] = useState(null);
-
-  // LinkedIn chat state
-  const [liOpen, setLiOpen] = useState(true); // keep panel open by default when NO_RESULTS
   const [liInput, setLiInput] = useState("");
-  const [liChat, setLiChat] = useState([]); // {role:'user'|'assistant'|'system', text:string}
   const [liBusy, setLiBusy] = useState(false);
+  const hasNoResults = useMemo(() => (data ? (data.results?.length ?? 0) === 0 : false), [data]);
 
-  const apiPost = async (url, body) => {
-    const res = await fetch(url, {
-      method: "POST",
-      headers: { "Content-Type": "application/json", Accept: "application/json" },
-      body: body ? JSON.stringify(body) : null,
-    });
+  const S = styles();
 
-    const txt = await res.text();
-    if (!res.ok) throw new Error(`HTTP ${res.status} - ${txt}`);
-    try {
-      return JSON.parse(txt);
-    } catch {
-      // if backend returns non-json
-      return { raw: txt };
-    }
-  };
-
-  const apiGet = async (url) => {
-    const res = await fetch(url, { method: "GET", headers: { Accept: "application/json" } });
-    const txt = await res.text();
-    if (!res.ok) throw new Error(`HTTP ${res.status} - ${txt}`);
-    try {
-      return JSON.parse(txt);
-    } catch {
-      return { raw: txt };
-    }
-  };
-
-  const refreshResults = async (id_demande) => {
-    if (!id_demande) return;
-    try {
-      const json = await apiGet(`/api/demander/${id_demande}`);
-      setData((prev) => ({
-        ...prev,
-        criteria: json.criteria ?? prev?.criteria,
-        results: json.results ?? prev?.results,
-      }));
-    } catch {
-      // not blocking
-    }
+  const showToast = (msg) => {
+    setToast(msg);
+    window.clearTimeout(showToast._t);
+    showToast._t = window.setTimeout(() => setToast(""), 2200);
   };
 
   const runSearch = async () => {
+    setUiError("");
     setLoading(true);
-    setError("");
-    setActionMsg("");
     setData(null);
-
-    // reset LinkedIn UI each search
+    setSelectedId(null);
+    setProfile(null);
     setLinkedinPost("");
-    setLinkedinPostId(null);
-    setLiChat([]);
     setLiInput("");
-    setLiOpen(true);
 
     try {
       const json = await apiPost("/api/chat/search", { message });
       setData(json);
 
-      // if NO_RESULTS, show linkedin post + initialize chat
+      const first = json?.results?.[0];
+      if (first?.id_file) setSelectedId(first.id_file);
+
       const postText =
         json?.linkedin?.post_text ||
         json?.linkedin_post ||
         json?.linkedin_post_text ||
         "";
 
-      const idPost = json?.linkedin?.id_post ?? json?.linkedin?.idPost ?? null;
-
       if ((json?.results?.length ?? 0) === 0 && postText) {
         setLinkedinPost(postText);
-        setLinkedinPostId(idPost);
-
-        setLiChat([
-          {
-            role: "assistant",
-            text:
-              "0 résultats trouvés. Voici un post LinkedIn proposé (tu peux le modifier en envoyant des instructions).",
-          },
-          { role: "assistant", text: postText },
-          {
-            role: "assistant",
-            text: "Donne une instruction (ex: “plus long”, “ajoute Rabat”, “plus pro”, “poste plus humain”, etc.).",
-          },
-        ]);
-        setLiOpen(true);
       }
     } catch (e) {
-      setError(e.message || "Erreur inconnue");
+      setUiError(e.message || "Erreur inconnue");
     } finally {
       setLoading(false);
     }
   };
 
-  // ===== RESULTS actions =====
-  const openCv = async (r) => {
-    if (!data?.id_demande) return;
-    try {
-      setActionMsg("");
-      await apiPost(`/api/demander/${data.id_demande}/${r.id_file}/viewed`);
-      const url = r.cv_url || `/api/cv/${r.id_file}`;
-      window.open(url, "_blank", "noopener,noreferrer");
-      setActionMsg(`CV ouvert — VIEWED enregistré (file=${r.id_file}).`);
-      await refreshResults(data.id_demande);
-    } catch (e) {
-      setActionMsg(`Erreur VIEWED: ${e.message}`);
-    }
-  };
+  // fetch profile when selected changes
+  useEffect(() => {
+    const go = async () => {
+      if (!selectedId) return;
+      setProfileLoading(true);
+      setProfile(null);
+      setUiError("");
 
-  const markInterview = async (r) => {
-    if (!data?.id_demande) return;
-    try {
-      setActionMsg("");
-      const json = await apiPost(`/api/demander/${data.id_demande}/${r.id_file}/interview`);
-      const emailOk = json?.email?.ok;
-      const emailStatus = json?.email?.status;
-
-      setActionMsg(
-        `INTERVIEW ${json.ok ? "OK" : "NO"} (file=${r.id_file}) — email: ${
-          emailOk ? "envoyé" : "échec"
-        }${emailStatus ? ` (HTTP ${emailStatus})` : ""}`
-      );
-      await refreshResults(data.id_demande);
-    } catch (e) {
-      setActionMsg(`Erreur INTERVIEW: ${e.message}`);
-    }
-  };
-
-  const badgeStyle = (status) => {
-    const s = String(status || "PROPOSED").toUpperCase();
-    const base = {
-      padding: "2px 8px",
-      borderRadius: 999,
-      fontSize: 12,
-      border: "1px solid #ddd",
-      background: "#f7f7f7",
+      try {
+        const json = await apiGet(`/api/candidates/${selectedId}/profile`);
+        setProfile(json);
+      } catch (e) {
+        setUiError(e.message || "Erreur profile");
+      } finally {
+        setProfileLoading(false);
+      }
     };
-    if (s === "VIEWED") return { ...base, background: "#eef6ff", borderColor: "#bcdcff" };
-    if (s === "INTERVIEW") return { ...base, background: "#eefaf1", borderColor: "#bfe8c9" };
-    return base;
-  };
+    go();
+  }, [selectedId]);
 
-  const canInterview = (status) => {
-    const s = String(status || "PROPOSED").toUpperCase();
-    return s === "PROPOSED" || s === "VIEWED";
-  };
-
-  // ===== LinkedIn chat =====
-  const hasNoResults = useMemo(() => (data ? (data.results?.length ?? 0) === 0 : false), [data]);
-
-  const sendLiInstruction = async () => {
-    if (!liInput.trim()) return;
+  const markViewed = async (id_file) => {
     if (!data?.id_demande) return;
-
-    const instruction = liInput.trim();
-    setLiInput("");
-
-    // keep the chat open and append the user's message
-    setLiChat((prev) => [...prev, { role: "user", text: instruction }]);
-    setLiBusy(true);
-    setActionMsg("");
-
     try {
-      // ✅ Route simple by demande (ton route:list montre POST api/linkedin/revise)
+      await apiPost(`/api/demander/${data.id_demande}/${id_file}/viewed`);
+      showToast("VIEWED ✅");
+    } catch (e) {
+      showToast(`Erreur VIEWED: ${e.message}`);
+    }
+  };
+
+  const markInterview = async (id_file) => {
+    if (!data?.id_demande) return;
+    try {
+      const json = await apiPost(`/api/demander/${data.id_demande}/${id_file}/interview`);
+      const ok = json?.email?.ok;
+      showToast(ok ? "INTERVIEW + email ✅" : "INTERVIEW ✅ (email échec)");
+    } catch (e) {
+      showToast(`Erreur INTERVIEW: ${e.message}`);
+    }
+  };
+
+  const sendLinkedinRevise = async () => {
+    if (!data?.id_demande) return;
+    if (!linkedinPost) return;
+    if (!liInput.trim()) return;
+
+    setLiBusy(true);
+    try {
       const json = await apiPost("/api/linkedin/revise", {
         id_demande: data.id_demande,
-        instruction,
+        instruction: liInput.trim(),
         current_post: linkedinPost,
       });
 
-      const newPost =
-        json?.post_text ||
-        json?.linkedin?.post_text ||
-        json?.post ||
-        "";
-
-      if (!newPost) {
-        // keep chat open, just warn
-        setLiChat((prev) => [
-          ...prev,
-          {
-            role: "assistant",
-            text:
-              "Je n’ai pas reçu de nouveau texte depuis l’API. Vérifie la réponse backend (champ post_text).",
-          },
-        ]);
-      } else {
+      const newPost = json?.post_text || json?.linkedin?.post_text || json?.post || "";
+      if (newPost) {
         setLinkedinPost(newPost);
-
-        // append assistant answer (updated post)
-        setLiChat((prev) => [
-          ...prev,
-          { role: "assistant", text: "✅ Post mis à jour :" },
-          { role: "assistant", text: newPost },
-          {
-            role: "assistant",
-            text:
-              "Tu veux changer quoi d’autre ? (ex: ton plus pro, ajouter ville/contrat, missions plus précises, etc.)",
-          },
-        ]);
+        setLiInput("");
+        showToast("Post LinkedIn mis à jour ✅");
+      } else {
+        showToast("API revise: post_text manquant");
       }
     } catch (e) {
-      setLiChat((prev) => [
-        ...prev,
-        {
-          role: "assistant",
-          text: `❌ Erreur côté API /api/linkedin/revise. Backend dit: ${e.message}`,
-        },
-        {
-          role: "assistant",
-          text: "On peut réessayer avec une instruction plus précise, mais il faut d’abord corriger l’erreur backend.",
-        },
-      ]);
+      showToast(`Erreur revise: ${e.message}`);
     } finally {
       setLiBusy(false);
     }
   };
 
-  const endLiChat = () => {
-    // user can end when THEY want
-    setLiOpen(false);
-    setLiChat((prev) => [...prev, { role: "system", text: "Conversation terminée." }]);
-  };
+  // ===== If dashboard view =====
+  if (view === "dashboard") {
+    return (
+      <div style={S.page}>
+        <div style={S.topbar}>
+          <div style={S.brand}>
+            <div style={S.logo}>S</div>
+            <div>
+              <div style={S.brandTitle}>SmartHire</div>
+              <div style={S.brandSub}>Tableau de bord</div>
+            </div>
+          </div>
 
-  // UI helpers
-  const chatBubbleStyle = (role) => {
-    const isUser = role === "user";
-    const isSystem = role === "system";
-    return {
-      alignSelf: isSystem ? "center" : isUser ? "flex-end" : "flex-start",
-      maxWidth: "92%",
-      whiteSpace: "pre-wrap",
-      padding: "10px 12px",
-      borderRadius: 12,
-      fontSize: 13,
-      lineHeight: 1.45,
-      border: "1px solid #2b2b2b",
-      background: isSystem ? "#0b1020" : isUser ? "#111827" : "#0f172a",
-      color: "#f9fafb",
-      opacity: isSystem ? 0.85 : 1,
-    };
-  };
+          <div style={{ display: "flex", gap: 10 }}>
+            <button style={S.btnGhost} onClick={() => setView("search")}>
+              ← Retour Search
+            </button>
+          </div>
+        </div>
+
+        <Dashboard />
+      </div>
+    );
+  }
+
+  // ===== Search view =====
+  const results = data?.results || [];
+  const selected = results.find((r) => r.id_file === selectedId) || null;
 
   return (
-    <div style={{ padding: 24, fontFamily: "Arial" }}>
-      <h2>SmartHire — Chat Search (test)</h2>
+    <div style={S.page}>
+      {/* TOP BAR */}
+      <div style={S.topbar}>
+        <div style={S.brand}>
+          <div style={S.logo}>S</div>
+          <div>
+            <div style={S.brandTitle}>SmartHire</div>
+            <div style={S.brandSub}>Recherche conversationnelle de candidats</div>
+          </div>
+        </div>
 
-      <div style={{ display: "flex", gap: 8, maxWidth: 900 }}>
-        <input
-          value={message}
-          onChange={(e) => setMessage(e.target.value)}
-          style={{ flex: 1, padding: 10 }}
-          placeholder="Ex: Je cherche 5 développeurs Java Spring React à Rabat"
-          onKeyDown={(e) => {
-            if (e.key === "Enter") runSearch();
-          }}
-        />
-        <button onClick={runSearch} disabled={loading} style={{ padding: "10px 14px" }}>
-          {loading ? "Recherche..." : "Rechercher"}
-        </button>
+        <div style={{ display: "flex", gap: 10 }}>
+          <button style={S.btnGhost} onClick={() => setView("dashboard")}>
+            Dashboard
+          </button>
+
+          <button
+            style={S.btnGhost}
+            onClick={() => {
+              setMessage("On est l’entreprise IBM, on cherche 3 Développeur Laravel React à Rabat");
+              showToast("Exemple inséré ✅");
+            }}
+          >
+            Exemple
+          </button>
+        </div>
       </div>
 
-      {error && (
-        <div style={{ marginTop: 16, color: "crimson", whiteSpace: "pre-wrap" }}>{error}</div>
-      )}
+      {/* SEARCH */}
+      <div style={S.searchWrap}>
+        <div style={S.searchBox}>
+          <span style={S.searchIcon}>⌕</span>
+          <input
+            style={S.searchInput}
+            value={message}
+            onChange={(e) => setMessage(e.target.value)}
+            placeholder="Ex : Développeur React à Rabat, 3 ans d’expérience"
+            onKeyDown={(e) => {
+              if (e.key === "Enter") runSearch();
+            }}
+          />
+          <button style={S.searchBtn} onClick={runSearch} disabled={loading}>
+            {loading ? "Recherche..." : "Rechercher"}
+          </button>
+        </div>
 
-      {actionMsg && (
-        <div style={{ marginTop: 12, color: "#333", whiteSpace: "pre-wrap" }}>{actionMsg}</div>
-      )}
+        {uiError && <div style={S.error}>{uiError}</div>}
+      </div>
 
+      {/* MAIN GRID */}
       {data && (
-        <div style={{ marginTop: 16 }}>
-          <h3>Résultats (Demande #{data.id_demande})</h3>
+        <div style={S.grid}>
+          {/* LEFT: RESULTS */}
+          <div style={S.panel}>
+            <div style={S.panelHeader}>
+              <div>
+                <div style={S.panelTitle}>
+                  Résultats {data?.id_demande ? `(Demande #${data.id_demande})` : ""}
+                </div>
+                <div style={S.panelSub}>{results.length} profil(s)</div>
+              </div>
+              <div style={S.pill}>local-dev</div>
+            </div>
 
-          {/* ===== If results exist ===== */}
-          {(data.results?.length ?? 0) > 0 && (
-            <ul style={{ paddingLeft: 18 }}>
-              {data.results?.map((r) => {
-                const status = r.status || "PROPOSED";
-                const interviewDisabled = !canInterview(status);
-
+            <div style={S.list}>
+              {results.map((r) => {
+                const active = r.id_file === selectedId;
+                const name = `${r.prenom ?? ""} ${r.nom ?? ""}`.trim() || `Candidat #${r.id_file}`;
+                const skills = r.skills_preview || [];
                 return (
-                  <li key={r.id_file} style={{ marginBottom: 12 }}>
-                    <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+                  <div
+                    key={r.id_file}
+                    style={active ? { ...S.card, ...S.cardActive } : S.card}
+                    onClick={() => setSelectedId(r.id_file)}
+                  >
+                    <div style={S.row}>
+                      <div style={S.avatar}>{(name[0] || "C").toUpperCase()}</div>
                       <div style={{ flex: 1 }}>
-                        <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
-                          <b>
-                            {r.prenom} {r.nom}
-                          </b>
-                          <span style={badgeStyle(status)}>{String(status).toUpperCase()}</span>
+                        <div style={S.cardName}>{name}</div>
+                        <div style={S.cardMeta}>
+                          Score: {Number(r.score ?? 0).toFixed(3)} • {r.email || "—"}
                         </div>
-                        <div style={{ marginTop: 4, color: "#444" }}>
-                          score: {Number(r.score).toFixed(3)} — {r.email}
-                        </div>
+                        {skills.length > 0 && (
+                          <div style={S.chips}>
+                            {skills.slice(0, 6).map((s, i) => (
+                              <span key={i} style={S.chip}>
+                                {String(s).toLowerCase()}
+                              </span>
+                            ))}
+                          </div>
+                        )}
                       </div>
 
-                      <button
-                        onClick={() => openCv(r)}
-                        style={{ padding: "6px 10px", cursor: "pointer" }}
-                        title="Ouvrir le CV + marquer VIEWED"
-                      >
-                        Voir CV
-                      </button>
-
-                      <button
-                        onClick={() => markInterview(r)}
-                        disabled={interviewDisabled}
-                        style={{
-                          padding: "6px 10px",
-                          cursor: interviewDisabled ? "not-allowed" : "pointer",
-                          opacity: interviewDisabled ? 0.6 : 1,
-                        }}
-                        title={
-                          interviewDisabled
-                            ? "Déjà en INTERVIEW"
-                            : "Passer à INTERVIEW + envoyer email"
-                        }
-                      >
-                        Je suis intéressé
-                      </button>
+                      <div style={S.statusPill}>{(r.status || "PROPOSED").toUpperCase()}</div>
                     </div>
-                  </li>
+                  </div>
                 );
               })}
-            </ul>
-          )}
 
-          {/* ===== If 0 results => LinkedIn Chat ===== */}
-          {hasNoResults && linkedinPost && (
-            <div style={{ marginTop: 16, border: "1px solid #ddd", borderRadius: 10, overflow: "hidden" }}>
-              <div style={{ padding: 12, background: "#0b1020", color: "#fff" }}>
-                <b>0 résultats — Chat LinkedIn (reste ouvert)</b>
-                <div style={{ fontSize: 12, opacity: 0.85, marginTop: 4 }}>
-                  Le post affiché ci-dessous est mis à jour à chaque instruction.
-                </div>
-              </div>
-
-              {liOpen ? (
-                <div style={{ padding: 12, background: "#0f0f10" }}>
-                  <div
-                    style={{
-                      display: "flex",
-                      flexDirection: "column",
-                      gap: 10,
-                      maxHeight: 360,
-                      overflow: "auto",
-                      paddingRight: 6,
-                    }}
-                  >
-                    {liChat.map((m, idx) => (
-                      <div key={idx} style={chatBubbleStyle(m.role)}>
-                        {m.text}
-                      </div>
-                    ))}
-                  </div>
-
-                  <div style={{ marginTop: 12 }}>
-                    <div style={{ fontSize: 13, color: "#bdbdbd", marginBottom: 6 }}>
-                      Donne une instruction (ex: “plus long”, “ajoute Rabat”, “mentionne CDI”, “ton plus humain”…)
-                    </div>
-
-                    <textarea
-                      value={liInput}
-                      onChange={(e) => setLiInput(e.target.value)}
-                      rows={3}
-                      style={{ width: "100%", padding: 10, borderRadius: 8 }}
-                      placeholder="Ex: Mets 'Capgemini' comme entreprise, précise qu'on cherche 5 developpeurs à Rabat, ajoute missions concrètes + type de contrat."
-                      onKeyDown={(e) => {
-                        if ((e.ctrlKey || e.metaKey) && e.key === "Enter") sendLiInstruction();
-                      }}
-                    />
-
-                    <div style={{ display: "flex", gap: 8, marginTop: 10 }}>
-                      <button
-                        onClick={sendLiInstruction}
-                        disabled={!liInput.trim() || liBusy}
-                        style={{
-                          padding: "8px 12px",
-                          cursor: liInput.trim() && !liBusy ? "pointer" : "not-allowed",
-                          opacity: liInput.trim() && !liBusy ? 1 : 0.6,
-                        }}
-                      >
-                        {liBusy ? "Modification..." : "Modifier le post"}
-                      </button>
-
-                      <button
-                        onClick={endLiChat}
-                        style={{ padding: "8px 12px", cursor: "pointer" }}
-                        title="Fermer le chat quand TU veux"
-                      >
-                        Terminer
-                      </button>
-                    </div>
-
-                    <div style={{ marginTop: 10, fontSize: 12, color: "#bdbdbd" }}>
-                      Astuce : Ctrl+Enter (ou Cmd+Enter) pour envoyer plus vite.
-                    </div>
-
-                    <details style={{ marginTop: 10 }}>
-                      <summary style={{ cursor: "pointer", color: "#e5e7eb" }}>
-                        Post LinkedIn (texte courant)
-                      </summary>
-                      <pre style={{ background: "#111827", color: "#F9FAFB", padding: 12, borderRadius: 8, overflow: "auto" }}>
-                        {linkedinPost}
-                      </pre>
-                    </details>
-                  </div>
-                </div>
-              ) : (
-                <div style={{ padding: 12 }}>
-                  <button
-                    onClick={() => setLiOpen(true)}
-                    style={{ padding: "8px 12px", cursor: "pointer" }}
-                  >
-                    Rouvrir le chat LinkedIn
-                  </button>
+              {results.length === 0 && (
+                <div style={S.empty}>
+                  Aucun profil trouvé.
+                  <div style={S.emptySub}>À droite, tu peux générer un post LinkedIn (fallback).</div>
                 </div>
               )}
             </div>
-          )}
+          </div>
 
-          <details style={{ marginTop: 16 }}>
-            <summary>JSON complet</summary>
-            <pre style={{ background: "#f5f5f5", padding: 12, overflow: "auto" }}>
-              {JSON.stringify(data, null, 2)}
-            </pre>
-          </details>
+          {/* MIDDLE: PROFILE */}
+          <div style={S.panel}>
+            <div style={S.panelHeader}>
+              <div>
+                <div style={S.panelTitle}>Profil</div>
+                <div style={S.panelSub}>Détails du candidat sélectionné</div>
+              </div>
+              {selected && <div style={S.statusPill}>{(selected.status || "PROPOSED").toUpperCase()}</div>}
+            </div>
+
+            {!selected && <div style={S.empty}>Sélectionne un candidat.</div>}
+
+            {selected && (
+              <div style={{ padding: 14 }}>
+                <div style={S.profileTop}>
+                  <div style={S.avatarBig}>
+                    {(String(selected?.prenom || selected?.nom || "C")[0] || "C").toUpperCase()}
+                  </div>
+
+                  <div style={{ flex: 1 }}>
+                    <div style={S.profileName}>
+                      {`${selected?.prenom ?? ""} ${selected?.nom ?? ""}`.trim()}
+                    </div>
+                    <div style={S.profileMeta}>
+                      Score: {Number(selected.score ?? 0).toFixed(3)} • {selected.email || "—"}
+                    </div>
+
+                    <div style={S.actions}>
+                      <button
+                        style={S.btnGhost}
+                        onClick={async () => {
+                          await markViewed(selected.id_file);
+                          window.open(selected.cv_url || `/api/cv/${selected.id_file}`, "_blank", "noopener,noreferrer");
+                        }}
+                      >
+                        Voir CV
+                      </button>
+                      <button style={S.btnPrimary} onClick={() => markInterview(selected.id_file)}>
+                        Je suis intéressé
+                      </button>
+                    </div>
+                  </div>
+                </div>
+
+                <div style={S.divider} />
+
+                <div style={S.blockTitle}>Résumé</div>
+                {profileLoading ? (
+                  <div style={S.skeleton}>Chargement du profil…</div>
+                ) : (
+                  <div style={S.textBlock}>{profile?.summary?.trim() ? profile.summary : "—"}</div>
+                )}
+
+                <div style={S.divider} />
+
+                <div style={S.blockTitle}>Expériences</div>
+                {profileLoading ? (
+                  <div style={S.skeleton}>Chargement…</div>
+                ) : (
+                  <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
+                    {(profile?.experiences || []).length === 0 && <div style={S.textBlock}>—</div>}
+                    {(profile?.experiences || []).slice(0, 6).map((ex, idx) => (
+                      <div key={idx} style={S.expCard}>
+                        <div style={S.expTitleRow}>
+                          <div style={S.expTitle}>{ex.title || "Expérience"}</div>
+                          <div style={S.expPeriod}>{ex.period || ""}</div>
+                        </div>
+                        {ex.company && <div style={S.expCompany}>{ex.company}</div>}
+                        {ex.description && <div style={S.expDesc}>{ex.description}</div>}
+                      </div>
+                    ))}
+                  </div>
+                )}
+
+                <div style={S.divider} />
+
+                <div style={S.blockTitle}>Compétences</div>
+                {profileLoading ? (
+                  <div style={S.skeleton}>Chargement…</div>
+                ) : (
+                  <div style={S.chipsWrap}>
+                    {(profile?.skills || []).length === 0 && <div style={S.textBlock}>—</div>}
+                    {(profile?.skills || []).slice(0, 40).map((sk, i) => (
+                      <span key={i} style={S.skillChip}>
+                        {String(sk).toLowerCase()}
+                      </span>
+                    ))}
+                  </div>
+                )}
+              </div>
+            )}
+          </div>
+
+          {/* RIGHT: LINKEDIN */}
+          <div style={S.panel}>
+            <div style={S.panelHeader}>
+              <div>
+                <div style={S.panelTitle}>LinkedIn (fallback)</div>
+                <div style={S.panelSub}>S’affiche quand il y a 0 résultats</div>
+              </div>
+            </div>
+
+            <div style={{ padding: 14 }}>
+              {!hasNoResults || !linkedinPost ? (
+                <div style={S.textBlock}>—</div>
+              ) : (
+                <>
+                  <pre style={S.postPre}>{linkedinPost}</pre>
+
+                  <textarea
+                    style={S.textarea}
+                    value={liInput}
+                    onChange={(e) => setLiInput(e.target.value)}
+                    placeholder="Ex: Mets IBM, précise 5 plombiers à Rabat, ajoute missions + CDI…"
+                    rows={3}
+                    onKeyDown={(e) => {
+                      if ((e.ctrlKey || e.metaKey) && e.key === "Enter") sendLinkedinRevise();
+                    }}
+                  />
+
+                  <div style={{ display: "flex", gap: 10, marginTop: 10 }}>
+                    <button style={S.btnPrimary} onClick={sendLinkedinRevise} disabled={liBusy}>
+                      {liBusy ? "Modification..." : "Modifier le post"}
+                    </button>
+                  </div>
+                </>
+              )}
+            </div>
+          </div>
         </div>
       )}
+
+      {toast && <div style={S.toast}>{toast}</div>}
     </div>
   );
+}
+
+function styles() {
+  return {
+    page: {
+      minHeight: "100vh",
+      background: "radial-gradient(1200px 700px at 20% 0%, rgba(59,130,246,.18), transparent 60%), radial-gradient(900px 700px at 85% 10%, rgba(99,102,241,.12), transparent 55%), #05070d",
+      color: "#E5E7EB",
+      fontFamily: "ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, Arial",
+      padding: 18,
+    },
+    topbar: {
+      display: "flex",
+      alignItems: "center",
+      justifyContent: "space-between",
+      gap: 12,
+      marginBottom: 14,
+    },
+    brand: { display: "flex", alignItems: "center", gap: 12 },
+    logo: {
+      width: 36,
+      height: 36,
+      borderRadius: 12,
+      display: "grid",
+      placeItems: "center",
+      background: "linear-gradient(135deg, rgba(59,130,246,.9), rgba(99,102,241,.9))",
+      fontWeight: 900,
+    },
+    brandTitle: { fontWeight: 800, fontSize: 16, color: "#fff" },
+    brandSub: { fontSize: 12, opacity: 0.75 },
+
+    searchWrap: { marginBottom: 12 },
+    searchBox: {
+      display: "flex",
+      alignItems: "center",
+      gap: 10,
+      padding: 10,
+      borderRadius: 16,
+      border: "1px solid rgba(148,163,184,.16)",
+      background: "rgba(17,24,39,.55)",
+      boxShadow: "0 10px 30px rgba(0,0,0,.35)",
+    },
+    searchIcon: { opacity: 0.7, paddingLeft: 6 },
+    searchInput: {
+      flex: 1,
+      border: "none",
+      outline: "none",
+      background: "transparent",
+      color: "#E5E7EB",
+      fontSize: 13,
+      padding: 10,
+    },
+    searchBtn: {
+      padding: "10px 14px",
+      borderRadius: 12,
+      border: "1px solid rgba(59,130,246,.35)",
+      background: "rgba(37,99,235,.9)",
+      color: "#fff",
+      fontWeight: 700,
+      cursor: "pointer",
+    },
+
+    grid: {
+      display: "grid",
+      gridTemplateColumns: "1.05fr 1.25fr .8fr",
+      gap: 14,
+      alignItems: "start",
+    },
+    panel: {
+      borderRadius: 18,
+      border: "1px solid rgba(148,163,184,.16)",
+      background: "rgba(17,24,39,.48)",
+      boxShadow: "0 10px 26px rgba(0,0,0,.30)",
+      overflow: "hidden",
+    },
+    panelHeader: {
+      padding: 14,
+      display: "flex",
+      alignItems: "center",
+      justifyContent: "space-between",
+      gap: 10,
+      borderBottom: "1px solid rgba(148,163,184,.10)",
+      background: "rgba(2,6,23,.35)",
+    },
+    panelTitle: { fontWeight: 800, fontSize: 14, color: "#fff" },
+    panelSub: { fontSize: 12, opacity: 0.7, marginTop: 2 },
+    pill: {
+      padding: "4px 10px",
+      borderRadius: 999,
+      fontSize: 12,
+      border: "1px solid rgba(148,163,184,.18)",
+      background: "rgba(2,6,23,.35)",
+      opacity: 0.9,
+    },
+
+    list: { padding: 12, display: "flex", flexDirection: "column", gap: 10 },
+    card: {
+      padding: 12,
+      borderRadius: 14,
+      border: "1px solid rgba(148,163,184,.12)",
+      background: "rgba(2,6,23,.25)",
+      cursor: "pointer",
+      transition: "150ms",
+    },
+    cardActive: {
+      border: "1px solid rgba(59,130,246,.55)",
+      boxShadow: "0 0 0 1px rgba(59,130,246,.20) inset",
+      background: "rgba(37,99,235,.10)",
+    },
+    row: { display: "flex", alignItems: "center", gap: 12 },
+    avatar: {
+      width: 34,
+      height: 34,
+      borderRadius: 12,
+      display: "grid",
+      placeItems: "center",
+      background: "rgba(148,163,184,.10)",
+      border: "1px solid rgba(148,163,184,.12)",
+      fontWeight: 800,
+      color: "#fff",
+    },
+    cardName: { fontWeight: 800, color: "#fff", fontSize: 14 }, // ✅ NOMS EN BLANC
+    cardMeta: { fontSize: 12, opacity: 0.75, marginTop: 2 },
+
+    chips: { display: "flex", flexWrap: "wrap", gap: 6, marginTop: 8 },
+    chip: {
+      fontSize: 11,
+      padding: "4px 8px",
+      borderRadius: 999,
+      border: "1px solid rgba(148,163,184,.14)",
+      background: "rgba(2,6,23,.30)",
+      opacity: 0.95,
+    },
+
+    statusPill: {
+      padding: "4px 10px",
+      borderRadius: 999,
+      fontSize: 11,
+      border: "1px solid rgba(148,163,184,.16)",
+      background: "rgba(2,6,23,.35)",
+      color: "#fff",
+      whiteSpace: "nowrap",
+    },
+
+    profileTop: { display: "flex", gap: 12, alignItems: "center" },
+    avatarBig: {
+      width: 52,
+      height: 52,
+      borderRadius: 18,
+      display: "grid",
+      placeItems: "center",
+      background: "rgba(148,163,184,.10)",
+      border: "1px solid rgba(148,163,184,.12)",
+      fontWeight: 900,
+      fontSize: 18,
+      color: "#fff",
+    },
+    profileName: { fontWeight: 900, fontSize: 18, color: "#fff" },
+    profileMeta: { fontSize: 12, opacity: 0.75, marginTop: 2 },
+    actions: { display: "flex", gap: 10, marginTop: 10 },
+
+    btnGhost: {
+      padding: "9px 12px",
+      borderRadius: 12,
+      border: "1px solid rgba(148,163,184,.16)",
+      background: "rgba(2,6,23,.20)",
+      color: "#E5E7EB",
+      fontWeight: 700,
+      cursor: "pointer",
+    },
+    btnPrimary: {
+      padding: "9px 12px",
+      borderRadius: 12,
+      border: "1px solid rgba(59,130,246,.30)",
+      background: "rgba(37,99,235,.95)",
+      color: "#fff",
+      fontWeight: 800,
+      cursor: "pointer",
+    },
+
+    divider: { height: 1, background: "rgba(148,163,184,.10)", margin: "14px 0" },
+    blockTitle: { fontWeight: 900, color: "#fff", fontSize: 13, marginBottom: 8 },
+    smallText: { fontSize: 12, opacity: 0.7, marginBottom: 10 },
+
+    textBlock: {
+      fontSize: 12,
+      opacity: 0.85,
+      lineHeight: 1.55,
+      padding: 10,
+      borderRadius: 12,
+      border: "1px solid rgba(148,163,184,.10)",
+      background: "rgba(2,6,23,.22)",
+    },
+
+    expCard: {
+      padding: 10,
+      borderRadius: 12,
+      border: "1px solid rgba(148,163,184,.10)",
+      background: "rgba(2,6,23,.22)",
+    },
+    expTitleRow: { display: "flex", justifyContent: "space-between", gap: 10, alignItems: "baseline" },
+    expTitle: { fontWeight: 900, fontSize: 12, color: "#fff" },
+    expPeriod: { fontSize: 11, opacity: 0.7 },
+    expCompany: { fontSize: 12, opacity: 0.85, marginTop: 4 },
+    expDesc: { fontSize: 12, opacity: 0.75, marginTop: 6, lineHeight: 1.5 },
+
+    chipsWrap: { display: "flex", flexWrap: "wrap", gap: 8 },
+    skillChip: {
+      fontSize: 11,
+      padding: "6px 10px",
+      borderRadius: 999,
+      border: "1px solid rgba(148,163,184,.14)",
+      background: "rgba(2,6,23,.30)",
+      color: "#E5E7EB",
+    },
+
+    filterBlock: { marginBottom: 12 },
+    filterLabel: { fontSize: 12, opacity: 0.7 },
+    filterValue: { fontSize: 13, fontWeight: 800, marginTop: 4, color: "#fff" },
+
+    postPre: {
+      whiteSpace: "pre-wrap",
+      padding: 12,
+      borderRadius: 12,
+      border: "1px solid rgba(148,163,184,.10)",
+      background: "rgba(2,6,23,.22)",
+      fontSize: 12,
+      lineHeight: 1.55,
+      maxHeight: 220,
+      overflow: "auto",
+      marginBottom: 10,
+    },
+    textarea: {
+      width: "100%",
+      borderRadius: 12,
+      border: "1px solid rgba(148,163,184,.14)",
+      background: "rgba(2,6,23,.22)",
+      color: "#E5E7EB",
+      padding: 10,
+      outline: "none",
+      resize: "vertical",
+      fontSize: 12,
+      lineHeight: 1.5,
+    },
+
+    empty: { padding: 14, fontSize: 13, opacity: 0.85 },
+    emptySub: { marginTop: 6, fontSize: 12, opacity: 0.7 },
+    skeleton: { padding: 10, borderRadius: 12, background: "rgba(148,163,184,.08)", fontSize: 12, opacity: 0.85 },
+
+    error: {
+      marginTop: 10,
+      padding: 10,
+      borderRadius: 12,
+      border: "1px solid rgba(248,113,113,.30)",
+      background: "rgba(248,113,113,.10)",
+      color: "#FCA5A5",
+      fontSize: 13,
+      whiteSpace: "pre-wrap",
+    },
+
+    toast: {
+      position: "fixed",
+      right: 16,
+      bottom: 16,
+      padding: "10px 12px",
+      borderRadius: 12,
+      border: "1px solid rgba(148,163,184,.16)",
+      background: "rgba(0,0,0,.75)",
+      color: "#fff",
+      fontSize: 13,
+      maxWidth: 420,
+    },
+
+    debugSummary: { cursor: "pointer", opacity: 0.8, fontSize: 12, padding: "0 12px 12px" },
+    debugPre: {
+      marginTop: 10,
+      padding: 12,
+      borderRadius: 12,
+      background: "rgba(0,0,0,.25)",
+      overflow: "auto",
+      fontSize: 11,
+      margin: 12,
+    },
+  };
 }

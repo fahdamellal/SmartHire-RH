@@ -1,7 +1,0 @@
-                                    Postgres
-
-Entrer terminal Db :psql postgres
-Voir toutes les bases : \l
-Se Connecter DB : \c "Nom_DB"
-Voir les tables: \dt
-Voir la structure d'une table :\d "Nom_Table"

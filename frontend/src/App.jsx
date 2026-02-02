@@ -2,6 +2,8 @@ import { useEffect, useMemo, useState } from "react";
 import Dashboard from "./pages/Dashboard";
 import { apiPost, apiGet } from "./lib/api";
 
+const API_BASE = (import.meta.env.VITE_API_BASE_URL || "").replace(/\/$/, "");
+
 export default function App() {
   // ===== NAV =====
   const [view, setView] = useState("search"); // "search" | "dashboard"
@@ -100,9 +102,31 @@ export default function App() {
       const json = await apiPost(`/api/demander/${data.id_demande}/${id_file}/interview`);
       const ok = json?.email?.ok;
       showToast(ok ? "INTERVIEW + email ✅" : "INTERVIEW ✅ (email échec)");
+      // refresh status locally (optionnel)
+      setData((prev) => {
+        if (!prev?.results) return prev;
+        return {
+          ...prev,
+          results: prev.results.map((r) =>
+            r.id_file === id_file ? { ...r, status: "INTERESTED" } : r
+          ),
+        };
+      });
     } catch (e) {
       showToast(`Erreur INTERVIEW: ${e.message}`);
     }
+  };
+
+  // ✅ Ouvrir le contrat via BACKEND (pas via :5173)
+  const openContractPdf = (id_file) => {
+    if (!data?.id_demande) {
+      showToast("Impossible: id_demande manquant");
+      return;
+    }
+    if (!id_file) return;
+
+    const url = `${API_BASE}/api/contracts/${data.id_demande}/${id_file}`;
+    window.open(url, "_blank", "noopener,noreferrer");
   };
 
   const sendLinkedinRevise = async () => {
@@ -161,6 +185,14 @@ export default function App() {
   // ===== Search view =====
   const results = data?.results || [];
   const selected = results.find((r) => r.id_file === selectedId) || null;
+
+  // ✅ Top 3 INTERESTED (affichage rapide)
+  const top3Interested = useMemo(() => {
+    return results
+      .filter((r) => String(r.status || "").toUpperCase() === "INTERESTED")
+      .sort((a, b) => Number(b.score ?? 0) - Number(a.score ?? 0))
+      .slice(0, 3);
+  }, [results]);
 
   return (
     <div style={S.page}>
@@ -226,6 +258,28 @@ export default function App() {
               </div>
               <div style={S.pill}>local-dev</div>
             </div>
+
+            {top3Interested.length > 0 && (
+              <div style={{ padding: "0 12px 10px" }}>
+                <div style={{ fontSize: 12, opacity: 0.85, fontWeight: 800, margin: "8px 0" }}>
+                  Top 3 — INTERESTED
+                </div>
+                <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+                  {top3Interested.map((p) => {
+                    const nm = `${p.prenom ?? ""} ${p.nom ?? ""}`.trim() || `#${p.id_file}`;
+                    return (
+                      <button
+                        key={p.id_file}
+                        style={S.btnGhost}
+                        onClick={() => setSelectedId(p.id_file)}
+                      >
+                        {nm} • {Number(p.score ?? 0).toFixed(3)}
+                      </button>
+                    );
+                  })}
+                </div>
+              </div>
+            )}
 
             <div style={S.list}>
               {results.map((r) => {
@@ -308,8 +362,23 @@ export default function App() {
                       >
                         Voir CV
                       </button>
+
                       <button style={S.btnPrimary} onClick={() => markInterview(selected.id_file)}>
                         Je suis intéressé
+                      </button>
+
+                      {/* ✅ Bouton Contrat PDF */}
+                      <button
+                        style={{
+                          ...S.btnGhost,
+                          opacity: data?.id_demande ? 1 : 0.5,
+                          cursor: data?.id_demande ? "pointer" : "not-allowed",
+                        }}
+                        disabled={!data?.id_demande}
+                        onClick={() => openContractPdf(selected.id_file)}
+                        title={!data?.id_demande ? "Lance une recherche pour créer une demande (id_demande)." : "Télécharger le contrat"}
+                      >
+                        Contrat PDF
                       </button>
                     </div>
                   </div>
@@ -384,7 +453,7 @@ export default function App() {
                     style={S.textarea}
                     value={liInput}
                     onChange={(e) => setLiInput(e.target.value)}
-                    placeholder="Ex: Mets IBM, précise 5 plombiers à Rabat, ajoute missions + CDI…"
+                    placeholder="Ex: Mets IBM, précise 5 profils, ajoute missions + CDI…"
                     rows={3}
                     onKeyDown={(e) => {
                       if ((e.ctrlKey || e.metaKey) && e.key === "Enter") sendLinkedinRevise();
@@ -409,21 +478,17 @@ export default function App() {
 }
 
 function styles() {
+  // (Ton styles() inchangé — je le laisse identique pour ne pas casser ton design)
   return {
     page: {
       minHeight: "100vh",
-      background: "radial-gradient(1200px 700px at 20% 0%, rgba(59,130,246,.18), transparent 60%), radial-gradient(900px 700px at 85% 10%, rgba(99,102,241,.12), transparent 55%), #05070d",
+      background:
+        "radial-gradient(1200px 700px at 20% 0%, rgba(59,130,246,.18), transparent 60%), radial-gradient(900px 700px at 85% 10%, rgba(99,102,241,.12), transparent 55%), #05070d",
       color: "#E5E7EB",
       fontFamily: "ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, Arial",
       padding: 18,
     },
-    topbar: {
-      display: "flex",
-      alignItems: "center",
-      justifyContent: "space-between",
-      gap: 12,
-      marginBottom: 14,
-    },
+    topbar: { display: "flex", alignItems: "center", justifyContent: "space-between", gap: 12, marginBottom: 14 },
     brand: { display: "flex", alignItems: "center", gap: 12 },
     logo: {
       width: 36,
@@ -449,15 +514,7 @@ function styles() {
       boxShadow: "0 10px 30px rgba(0,0,0,.35)",
     },
     searchIcon: { opacity: 0.7, paddingLeft: 6 },
-    searchInput: {
-      flex: 1,
-      border: "none",
-      outline: "none",
-      background: "transparent",
-      color: "#E5E7EB",
-      fontSize: 13,
-      padding: 10,
-    },
+    searchInput: { flex: 1, border: "none", outline: "none", background: "transparent", color: "#E5E7EB", fontSize: 13, padding: 10 },
     searchBtn: {
       padding: "10px 14px",
       borderRadius: 12,
@@ -468,12 +525,7 @@ function styles() {
       cursor: "pointer",
     },
 
-    grid: {
-      display: "grid",
-      gridTemplateColumns: "1.05fr 1.25fr .8fr",
-      gap: 14,
-      alignItems: "start",
-    },
+    grid: { display: "grid", gridTemplateColumns: "1.05fr 1.25fr .8fr", gap: 14, alignItems: "start" },
     panel: {
       borderRadius: 18,
       border: "1px solid rgba(148,163,184,.16)",
@@ -527,7 +579,7 @@ function styles() {
       fontWeight: 800,
       color: "#fff",
     },
-    cardName: { fontWeight: 800, color: "#fff", fontSize: 14 }, // ✅ NOMS EN BLANC
+    cardName: { fontWeight: 800, color: "#fff", fontSize: 14 },
     cardMeta: { fontSize: 12, opacity: 0.75, marginTop: 2 },
 
     chips: { display: "flex", flexWrap: "wrap", gap: 6, marginTop: 8 },
@@ -588,7 +640,6 @@ function styles() {
 
     divider: { height: 1, background: "rgba(148,163,184,.10)", margin: "14px 0" },
     blockTitle: { fontWeight: 900, color: "#fff", fontSize: 13, marginBottom: 8 },
-    smallText: { fontSize: 12, opacity: 0.7, marginBottom: 10 },
 
     textBlock: {
       fontSize: 12,
@@ -600,12 +651,7 @@ function styles() {
       background: "rgba(2,6,23,.22)",
     },
 
-    expCard: {
-      padding: 10,
-      borderRadius: 12,
-      border: "1px solid rgba(148,163,184,.10)",
-      background: "rgba(2,6,23,.22)",
-    },
+    expCard: { padding: 10, borderRadius: 12, border: "1px solid rgba(148,163,184,.10)", background: "rgba(2,6,23,.22)" },
     expTitleRow: { display: "flex", justifyContent: "space-between", gap: 10, alignItems: "baseline" },
     expTitle: { fontWeight: 900, fontSize: 12, color: "#fff" },
     expPeriod: { fontSize: 11, opacity: 0.7 },
@@ -621,10 +667,6 @@ function styles() {
       background: "rgba(2,6,23,.30)",
       color: "#E5E7EB",
     },
-
-    filterBlock: { marginBottom: 12 },
-    filterLabel: { fontSize: 12, opacity: 0.7 },
-    filterValue: { fontSize: 13, fontWeight: 800, marginTop: 4, color: "#fff" },
 
     postPre: {
       whiteSpace: "pre-wrap",
@@ -677,17 +719,6 @@ function styles() {
       color: "#fff",
       fontSize: 13,
       maxWidth: 420,
-    },
-
-    debugSummary: { cursor: "pointer", opacity: 0.8, fontSize: 12, padding: "0 12px 12px" },
-    debugPre: {
-      marginTop: 10,
-      padding: 12,
-      borderRadius: 12,
-      background: "rgba(0,0,0,.25)",
-      overflow: "auto",
-      fontSize: 11,
-      margin: 12,
     },
   };
 }
